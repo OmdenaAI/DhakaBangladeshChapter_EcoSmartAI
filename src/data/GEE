@@ -1,0 +1,125 @@
+https://code.earthengine.google.com/?scriptPath=users%2Ftmbadr2015%2FDhaka%3ADhaka%20GEE
+
+// 1️⃣ Define Study Area: Dhaka City
+var dhaka = ee.FeatureCollection("FAO/GAUL/2015/level2")
+    .filter(ee.Filter.eq('ADM2_NAME', 'Dhaka'));
+
+Map.centerObject(dhaka, 10);
+Map.addLayer(dhaka, {color: 'blue'}, "Dhaka City");
+
+var dhakaGeometry = dhaka.geometry();
+
+// 2️⃣ Time range
+var startYear = 2015;
+var endYear = 2024;
+
+// 3️⃣ Placeholder for monthly stats
+var featuresList = ee.FeatureCollection([]);
+
+// 4️⃣ Loop over years and months
+var years = ee.List.sequence(startYear, endYear);
+var months = ee.List.sequence(1, 12);
+
+years.getInfo().forEach(function(year) {
+  months.getInfo().forEach(function(month) {
+    var start = ee.Date.fromYMD(year, month, 1);
+    var end = start.advance(1, 'month');
+
+    // Sentinel-2 NDVI
+    var ndvi = ee.ImageCollection("COPERNICUS/S2_SR")
+      .filterBounds(dhaka)
+      .filterDate(start, end)
+      .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
+      .select(['B8', 'B4'])
+      .map(function(img) {
+        return img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+      })
+      .mean()
+      .clip(dhaka);
+
+    // PM2.5 approximation from Aerosol Index
+    var pm25 = ee.ImageCollection("COPERNICUS/S5P/NRTI/L3_AER_AI")
+      .filterDate(start, end)
+      .select('absorbing_aerosol_index')
+      .mean()
+      .rename('PM25')
+      .clip(dhaka);
+
+    // Rainfall
+    var rainfall = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
+      .filterDate(start, end)
+      .sum()
+      .rename('Rainfall')
+      .clip(dhaka);
+
+    // Soil pH
+    var soilPH = ee.Image("OpenLandMap/SOL/SOL_PH-H2O_USDA-4C1A2A_M/v02")
+      .select('b0')
+      .rename('Soil_pH')
+      .clip(dhaka);
+
+    // Soil Organic Carbon
+    var soilCarbon = ee.Image("OpenLandMap/SOL/SOL_ORGANIC-CARBON_USDA-6A1C_M/v02")
+      .select('b0')
+      .rename('Soil_Carbon')
+      .clip(dhaka);
+
+    // Soil Moisture
+    var soilMoisture = ee.ImageCollection("NASA/SMAP/SPL3SMP_E/006")
+      .filterBounds(dhaka)
+      .filterDate(start, end)
+      .select('soil_moisture_am')
+      .mean()
+      .rename('Soil_Moisture')
+      .clip(dhaka);
+
+    // Built-Up Area
+    var builtUp = ee.Image("JRC/GHSL/P2016/BUILT_LDSMT_GLOBE_V1")
+      .select('built')
+      .rename('Built_Up')
+      .clip(dhaka);
+
+    // Land Cover
+    var landCover = ee.Image("ESA/WorldCover/v200/2021")
+      .rename('Land_Cover')
+      .clip(dhaka);
+
+    // Combine all layers
+    var combined = ndvi.addBands([pm25, rainfall, soilPH, soilCarbon, soilMoisture, builtUp, landCover]);
+
+    // Export as GeoTIFF
+    Export.image.toDrive({
+      image: combined.toFloat(),
+      description: 'envdata_' + year + '_' + month,
+      folder: 'GEE_Exports',
+      fileNamePrefix: 'envdata_' + year + '_' + month,
+      region: dhakaGeometry,
+      scale: 500,
+      maxPixels: 1e13
+    });
+
+    // Reduce to Feature
+    var stats = combined.reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: dhakaGeometry,
+      scale: 500,
+      maxPixels: 1e13
+    });
+
+    var feature = ee.Feature(null, stats).set({
+      'year': year,
+      'month': month
+    });
+
+    featuresList = featuresList.merge(ee.FeatureCollection([feature]));
+  });
+});
+
+// Export stats as CSV
+Export.table.toDrive({
+  collection: featuresList,
+  description: 'Monthly_Environmental_Stats',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'monthly_env_stats_dhaka',
+  fileFormat: 'CSV'
+});
